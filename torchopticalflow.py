@@ -3,7 +3,7 @@ import os
 import warnings
 from tqdm import tqdm
 import torch.nn.functional as F
-
+# with no cv2 or numpy ai spam..
 try:
     from torchvision.models.optical_flow import raft_small, Raft_Small_Weights
     HAS_RAFT = True
@@ -11,15 +11,10 @@ except ImportError:
     HAS_RAFT = False
     warnings.warn("torchvision >= 0.12 required for RAFT optical flow.")
 
-warnings.filterwarnings("ignore", category=UserWarning, module="torchvision")
-
-class DownsampleFPSNode:
-
+class torchflow:
     @classmethod
     def INPUT_TYPES(cls):
-
         max_cores = os.cpu_count()
-
         return {
             "required": {
                 "frames": ("IMAGE",), 
@@ -92,123 +87,6 @@ class DownsampleFPSNode:
 
         out_tensor = selected.permute(0, 2, 3, 1)
         return (out_tensor, float(target_fps))
-
-def frame_drop(pt_frames, indices, threads=0):
-    
-    idx = torch.tensor(indices, dtype=torch.long, device=pt_frames.device)
-    idx = torch.clamp(idx, 0, len(pt_frames) - 1)
-    selected = pt_frames[idx]
-
-    for _ in tqdm(range(len(idx)), desc="Dropping (fast tensor indexing)", unit="frame", colour="blue"):
-        pass
-
-    return selected
-
-def detect_scene_cuts(pt_frames, threshold=0.05):
-    n = len(pt_frames)
-    if n < 2:
-        return torch.zeros(0, dtype=torch.bool, device=torch.device('cpu'))
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    small_frames = []
-    chunk_size = 32
-    
-    for i in range(0, n, chunk_size):
-        chunk = pt_frames[i:i+chunk_size].to(device)
-        small_chunk = F.interpolate(chunk, size=(64, 64), mode='bicubic', align_corners=False)
-        small_frames.append(small_chunk.cpu())
-        
-    small_frames = torch.cat(small_frames, dim=0)
-    diff = small_frames[1:] - small_frames[:-1]
-    mse = (diff ** 2).mean(dim=[1, 2, 3])
-    
-    cuts = mse > threshold
-    return cuts
-
-def estimate_motion(frame_a, frame_b):
-    diff = torch.abs(frame_a - frame_b)
-    return diff.mean().item()
-
-def frame_blend(pt_frames, indices, threads=0, base_radius=3):
-    
-    n = len(pt_frames)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    cuts = detect_scene_cuts(pt_frames, threshold=0.05)
-    
-    def is_cut_between(a, b):
-        if a == b:
-            return False
-        lo, hi = min(a, b), max(a, b)
-        return cuts[lo:hi].any().item()
-
-    selected = []
-
-    for idx in tqdm(indices, desc=f"Blending (adaptive radius={base_radius})", colour="blue", unit="frame"):
-        center = int(idx)
-
-        if center < n - 1:
-            motion = estimate_motion(pt_frames[center], pt_frames[center + 1])
-        else:
-            motion = 0.0
-
-        adaptive_radius = int(base_radius * (1.0 - motion))
-        adaptive_radius = max(1, min(adaptive_radius, base_radius))
-
-        start = max(0, center - adaptive_radius)
-        end = min(n - 1, center + adaptive_radius)
-
-        frames_to_blend = []
-        weights_rgb = []
-
-        for i in range(start, end + 1):
-            if is_cut_between(center, i):
-                continue
-
-            dist = abs(i - center)
-
-            sigma = max((adaptive_radius / 2.0), 1e-6)
-            w = torch.exp(torch.tensor(-(dist ** 2) / (2 * sigma ** 2), device=device, dtype=torch.float32))
-
-            wr = w * 0.95
-            wg = w * 1.0
-            wb = w * 0.9
-
-            frames_to_blend.append(pt_frames[i].to(device))
-            weights_rgb.append(torch.stack([wr, wg, wb]).view(3, 1, 1).to(device))
-            
-        if not frames_to_blend:
-            selected.append(pt_frames[center])
-            continue
-
-        stack_f = torch.stack(frames_to_blend)
-        stack_w = torch.stack(weights_rgb)
-        
-        stack_w = stack_w / stack_w.sum(dim=0, keepdim=True)
-        lin = stack_f ** 2.2
-        acc = (lin * stack_w).sum(dim=0)
-        out = acc ** (1.0 / 2.2)
-        out = torch.clamp(out, 0.0, 1.0)
-        selected.append(out.cpu())
-
-    return torch.stack(selected)
-
-def warp_halfway(pt_frame, flow):
-    C, H, W = pt_frame.shape
-    device = pt_frame.device
-    
-    flow_half = flow * 0.5
-    
-    y, x = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
-    
-    x_norm = 2.0 * (x + flow_half[0]) / max(W - 1, 1) - 1.0
-    y_norm = 2.0 * (y + flow_half[1]) / max(H - 1, 1) - 1.0
-    
-    grid = torch.stack((x_norm, y_norm), dim=-1).unsqueeze(0)
-    frame_batch = pt_frame.unsqueeze(0)
-    
-    warped = F.grid_sample(frame_batch, grid, mode='bicubic', padding_mode='border', align_corners=True)
-    return warped.squeeze(0)
 
 def _compute_raft_flow(model, transforms, img1, img2, device, max_size=512):
     orig_H, orig_W = img1.shape[2], img1.shape[3]
@@ -416,3 +294,121 @@ def motion_compensated(pt_frames, indices, threads=0):
         selected.append(out.cpu())
 
     return torch.stack(selected)
+    
+def frame_drop(pt_frames, indices, threads=0):
+    
+    idx = torch.tensor(indices, dtype=torch.long, device=pt_frames.device)
+    idx = torch.clamp(idx, 0, len(pt_frames) - 1)
+    selected = pt_frames[idx]
+
+    for _ in tqdm(range(len(idx)), desc="Dropping (fast tensor indexing)", unit="frame", colour="blue"):
+        pass
+
+    return selected
+
+def detect_scene_cuts(pt_frames, threshold=0.05):
+    n = len(pt_frames)
+    if n < 2:
+        return torch.zeros(0, dtype=torch.bool, device=torch.device('cpu'))
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    small_frames = []
+    chunk_size = 32
+    
+    for i in range(0, n, chunk_size):
+        chunk = pt_frames[i:i+chunk_size].to(device)
+        small_chunk = F.interpolate(chunk, size=(64, 64), mode='bicubic', align_corners=False)
+        small_frames.append(small_chunk.cpu())
+        
+    small_frames = torch.cat(small_frames, dim=0)
+    diff = small_frames[1:] - small_frames[:-1]
+    mse = (diff ** 2).mean(dim=[1, 2, 3])
+    
+    cuts = mse > threshold
+    return cuts
+
+def estimate_motion(frame_a, frame_b):
+    diff = torch.abs(frame_a - frame_b)
+    return diff.mean().item()
+
+def frame_blend(pt_frames, indices, threads=0, base_radius=3):
+    
+    n = len(pt_frames)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    cuts = detect_scene_cuts(pt_frames, threshold=0.05)
+    
+    def is_cut_between(a, b):
+        if a == b:
+            return False
+        lo, hi = min(a, b), max(a, b)
+        return cuts[lo:hi].any().item()
+
+    selected = []
+
+    for idx in tqdm(indices, desc=f"Blending (adaptive radius={base_radius})", colour="blue", unit="frame"):
+        center = int(idx)
+
+        if center < n - 1:
+            motion = estimate_motion(pt_frames[center], pt_frames[center + 1])
+        else:
+            motion = 0.0
+
+        adaptive_radius = int(base_radius * (1.0 - motion))
+        adaptive_radius = max(1, min(adaptive_radius, base_radius))
+
+        start = max(0, center - adaptive_radius)
+        end = min(n - 1, center + adaptive_radius)
+
+        frames_to_blend = []
+        weights_rgb = []
+
+        for i in range(start, end + 1):
+            if is_cut_between(center, i):
+                continue
+
+            dist = abs(i - center)
+
+            sigma = max((adaptive_radius / 2.0), 1e-6)
+            w = torch.exp(torch.tensor(-(dist ** 2) / (2 * sigma ** 2), device=device, dtype=torch.float32))
+
+            wr = w * 0.95
+            wg = w * 1.0
+            wb = w * 0.9
+
+            frames_to_blend.append(pt_frames[i].to(device))
+            weights_rgb.append(torch.stack([wr, wg, wb]).view(3, 1, 1).to(device))
+            
+        if not frames_to_blend:
+            selected.append(pt_frames[center])
+            continue
+
+        stack_f = torch.stack(frames_to_blend)
+        stack_w = torch.stack(weights_rgb)
+        
+        stack_w = stack_w / stack_w.sum(dim=0, keepdim=True)
+        lin = stack_f ** 2.2
+        acc = (lin * stack_w).sum(dim=0)
+        out = acc ** (1.0 / 2.2)
+        out = torch.clamp(out, 0.0, 1.0)
+        selected.append(out.cpu())
+
+    return torch.stack(selected)
+
+def warp_halfway(pt_frame, flow):
+    C, H, W = pt_frame.shape
+    device = pt_frame.device
+    
+    flow_half = flow * 0.5
+    
+    y, x = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
+    
+    x_norm = 2.0 * (x + flow_half[0]) / max(W - 1, 1) - 1.0
+    y_norm = 2.0 * (y + flow_half[1]) / max(H - 1, 1) - 1.0
+    
+    grid = torch.stack((x_norm, y_norm), dim=-1).unsqueeze(0)
+    frame_batch = pt_frame.unsqueeze(0)
+    
+    warped = F.grid_sample(frame_batch, grid, mode='bicubic', padding_mode='border', align_corners=True)
+    return warped.squeeze(0)
+
